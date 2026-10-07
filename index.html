@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Змейка с порталами</title>
+<style>
+  :root {
+    --bg: #0f1020;
+    --panel: #181a33;
+    --text: #e8e9ff;
+    --muted: #8a8db8;
+    --accent: #7cf29c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at 50% 0%, #1c1f45, var(--bg) 70%);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    user-select: none;
+  }
+  h1 { margin: 0 0 12px; font-size: 28px; letter-spacing: 1px; }
+  h1 span { color: #b57cff; }
+  .hud {
+    display: flex; gap: 24px; margin-bottom: 12px;
+    font-size: 16px; color: var(--muted);
+  }
+  .hud b { color: var(--text); font-size: 20px; }
+  .wrap { position: relative; width: min(92vw, 70vh, 600px); aspect-ratio: 1; }
+  canvas {
+    width: 100%; height: 100%;
+    border-radius: 14px;
+    background: var(--panel);
+    box-shadow: 0 0 40px rgba(124, 242, 156, 0.15), inset 0 0 0 2px #2a2d55;
+    display: block;
+  }
+  .overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(15, 16, 32, 0.82);
+    border-radius: 14px;
+    text-align: center; padding: 20px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h2 { margin: 0 0 8px; font-size: 32px; }
+  .overlay p { margin: 4px 0; color: var(--muted); line-height: 1.5; }
+  button {
+    margin-top: 16px; padding: 12px 28px;
+    font-size: 18px; font-weight: 600;
+    border: none; border-radius: 10px;
+    background: var(--accent); color: #0f1020;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  .legend { margin-top: 12px; font-size: 14px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+  <h1>Змейка с <span>порталами</span></h1>
+  <div class="hud">
+    <div>Счёт: <b id="score">0</b></div>
+    <div>Рекорд: <b id="best">0</b></div>
+    <div>Скорость: <b id="level">1</b></div>
+  </div>
+  <div class="wrap">
+    <canvas id="game" width="600" height="600"></canvas>
+    <div class="overlay" id="overlay">
+      <h2 id="ovTitle">Готов?</h2>
+      <p id="ovText">
+        Стрелки / WASD — управление, пробел — пауза.<br>
+        На телефоне — свайпы.<br>
+        🟣 Портал телепортирует ко второму порталу.<br>
+        ⭐ Звезда даёт +5 очков, но быстро исчезает!
+      </p>
+      <button id="startBtn">Играть</button>
+    </div>
+  </div>
+  <div class="legend">Порталы перемещаются каждые 5 яблок. Скорость растёт с каждым яблоком.</div>
+
+<script>
+(() => {
+  const N = 24;                  // клеток по стороне
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const C = canvas.width / N;    // размер клетки в пикселях
+
+  const $ = id => document.getElementById(id);
+  const scoreEl = $('score'), bestEl = $('best'), levelEl = $('level');
+  const overlay = $('overlay'), ovTitle = $('ovTitle'), ovText = $('ovText'), startBtn = $('startBtn');
+
+  const DIRS = {
+    up: { x: 0, y: -1 }, down: { x: 0, y: 1 },
+    left: { x: -1, y: 0 }, right: { x: 1, y: 0 },
+  };
+
+  let best = 0;
+  try { best = parseInt(localStorage.getItem('snakePortalsBest'), 10) || 0; } catch (e) {}
+  bestEl.textContent = best;
+
+  let snake, dir, queue, food, portals, bonus, score, eaten, grow, tickMs, state, particles, teleportFlash;
+
+  function reset() {
+    snake = [{ x: 8, y: 12 }, { x: 7, y: 12 }, { x: 6, y: 12 }];
+    dir = DIRS.right;
+    queue = [];
+    score = 0; eaten = 0; grow = 0;
+    tickMs = 140;
+    particles = [];
+    teleportFlash = 0;
+    bonus = null;
+    portals = null;
+    placePortals();
+    food = freeCell();
+    updateHud();
+  }
+
+  const same = (a, b) => a && b && a.x === b.x && a.y === b.y;
+
+  function occupied(p) {
+    return snake.some(s => same(s, p)) ||
+      same(food, p) || same(bonus, p) ||
+      (portals && (same(portals[0], p) || same(portals[1], p)));
+  }
+
+  function freeCell(margin = 0) {
+    let p, tries = 0;
+    do {
+      p = {
+        x: margin + Math.floor(Math.random() * (N - margin * 2)),
+        y: margin + Math.floor(Math.random() * (N - margin * 2)),
+      };
+    } while (occupied(p) && ++tries < 1000);
+    return p;
+  }
+
+  function placePortals() {
+    portals = null;
+    // Порталы не у стен и не слишком близко друг к другу
+    const a = freeCell(2);
+    let b, tries = 0;
+    do { b = freeCell(2); } while (Math.abs(a.x - b.x) + Math.abs(a.y - b.y) < 10 && ++tries < 200);
+    portals = [a, b];
+  }
+
+  function updateHud() {
+    scoreEl.textContent = score;
+    bestEl.textContent = best;
+    levelEl.textContent = Math.round((140 - tickMs) / 5) + 1;
+  }
+
+  function burst(p, color, count = 14) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * 3;
+      particles.push({
+        x: (p.x + 0.5) * C, y: (p.y + 0.5) * C,
+        vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+        life: 1, color,
+      });
+    }
+  }
+
+  function step() {
+    // Берём следующий поворот из очереди (не даём развернуться на 180°)
+    while (queue.length) {
+      const d = queue.shift();
+      if (d.x !== -dir.x || d.y !== -dir.y) { dir = d; break; }
+    }
+
+    let head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+    if (head.x < 0 || head.y < 0 || head.x >= N || head.y >= N) return gameOver();
+
+    // Телепорт
+    if (same(head, portals[0])) { head = { ...portals[1] }; teleportFlash = 1; burst(portals[1], '#b57cff', 10); }
+    else if (same(head, portals[1])) { head = { ...portals[0] }; teleportFlash = 1; burst(portals[0], '#b57cff', 10); }
+
+    // Хвост уходит в этот же ход, поэтому его клетку можно занять
+    const body = grow > 0 ? snake : snake.slice(0, -1);
+    if (body.some(s => same(s, head))) return gameOver();
+
+    snake.unshift(head);
+
+    if (same(head, food)) {
+      score += 1; eaten += 1; grow += 1;
+      tickMs = Math.max(55, tickMs - 3);
+      burst(food, '#ff5d73');
+      if (eaten % 5 === 0) placePortals();
+      food = freeCell();
+      if (!bonus && Math.random() < 0.3) bonus = { ...freeCell(), ttl: 45 };
+    } else if (bonus && same(head, bonus)) {
+      score += 5; grow += 3;
+      burst(bonus, '#ffd23f', 24);
+      bonus = null;
+    }
+
+    if (bonus && --bonus.ttl <= 0) bonus = null;
+
+    if (grow > 0) grow--; else snake.pop();
+    updateHud();
+  }
+
+  function gameOver() {
+    state = 'over';
+    burst(snake[0], '#7cf29c', 30);
+    const record = score > best;
+    if (record) {
+      best = score;
+      try { localStorage.setItem('snakePortalsBest', best); } catch (e) {}
+    }
+    updateHud();
+    ovTitle.textContent = record ? '🏆 Новый рекорд!' : 'Игра окончена';
+    ovText.innerHTML = `Счёт: <b>${score}</b> · Длина: <b>${snake.length}</b>`;
+    startBtn.textContent = 'Ещё раз';
+    overlay.classList.remove('hidden');
+  }
+
+  function start() {
+    reset();
+    state = 'play';
+    overlay.classList.add('hidden');
+  }
+
+  function togglePause() {
+    if (state === 'play') {
+      state = 'paused';
+      ovTitle.textContent = 'Пауза';
+      ovText.textContent = 'Нажми пробел, чтобы продолжить';
+      startBtn.textContent = 'Продолжить';
+      overlay.classList.remove('hidden');
+    } else if (state === 'paused') {
+      state = 'play';
+      overlay.classList.add('hidden');
+    }
+  }
+
+  // ---------- Отрисовка ----------
+  function draw(t) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Сетка
+    ctx.fillStyle = '#1d2040';
+    for (let x = 0; x < N; x++)
+      for (let y = 0; y < N; y++)
+        if ((x + y) % 2 === 0) ctx.fillRect(x * C, y * C, C, C);
+
+    // Порталы — вращающиеся кольца
+    portals.forEach((p, i) => {
+      const cx = (p.x + 0.5) * C, cy = (p.y + 0.5) * C;
+      const g = ctx.createRadialGradient(cx, cy, 2, cx, cy, C);
+      g.addColorStop(0, 'rgba(181,124,255,0.9)');
+      g.addColorStop(1, 'rgba(181,124,255,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(cx - C, cy - C, C * 2, C * 2);
+      ctx.strokeStyle = '#e0c8ff';
+      ctx.lineWidth = 3;
+      const rot = t / 300 * (i ? -1 : 1);
+      ctx.beginPath();
+      ctx.arc(cx, cy, C * 0.38, rot, rot + Math.PI * 1.4);
+      ctx.stroke();
+    });
+
+    // Яблоко
+    const pulse = 1 + Math.sin(t / 200) * 0.08;
+    ctx.fillStyle = '#ff5d73';
+    ctx.beginPath();
+    ctx.arc((food.x + 0.5) * C, (food.y + 0.5) * C, C * 0.36 * pulse, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#7cf29c';
+    ctx.fillRect((food.x + 0.5) * C - 1, food.y * C + 2, 3, C * 0.25);
+
+    // Звезда-бонус (мигает перед исчезновением)
+    if (bonus && (bonus.ttl > 12 || Math.floor(t / 120) % 2)) {
+      drawStar((bonus.x + 0.5) * C, (bonus.y + 0.5) * C, C * 0.45, t / 400);
+    }
+
+    // Змейка: от хвоста к голове, с градиентом цвета
+    snake.slice().reverse().forEach((s, idx, arr) => {
+      const k = idx / arr.length;
+      ctx.fillStyle = `hsl(${140 - k * 40}, 80%, ${45 + k * 25}%)`;
+      const pad = 2;
+      roundRect(s.x * C + pad, s.y * C + pad, C - pad * 2, C - pad * 2, 6);
+    });
+
+    // Глаза
+    const h = snake[0];
+    const ex = (h.x + 0.5) * C, ey = (h.y + 0.5) * C;
+    ctx.fillStyle = '#0f1020';
+    [-1, 1].forEach(side => {
+      const ox = dir.x * 4 + dir.y * side * 5;
+      const oy = dir.y * 4 + dir.x * side * 5;
+      ctx.beginPath();
+      ctx.arc(ex + ox, ey + oy, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Частицы
+    particles = particles.filter(p => p.life > 0);
+    particles.forEach(p => {
+      p.x += p.vx; p.y += p.vy; p.vx *= 0.95; p.vy *= 0.95; p.life -= 0.03;
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+    });
+    ctx.globalAlpha = 1;
+
+    // Вспышка при телепорте
+    if (teleportFlash > 0) {
+      ctx.fillStyle = `rgba(181,124,255,${teleportFlash * 0.18})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      teleportFlash -= 0.05;
+    }
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.fill();
+  }
+
+  function drawStar(cx, cy, r, rot) {
+    ctx.fillStyle = '#ffd23f';
+    ctx.shadowColor = '#ffd23f';
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const a = rot + i * Math.PI / 5 - Math.PI / 2;
+      const rr = i % 2 ? r * 0.45 : r;
+      ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  // ---------- Главный цикл ----------
+  let last = 0, acc = 0;
+  function loop(t) {
+    const dt = Math.min(t - last, 200);
+    last = t;
+    if (state === 'play') {
+      acc += dt;
+      while (acc >= tickMs && state === 'play') { acc -= tickMs; step(); }
+    } else {
+      acc = 0;
+    }
+    draw(t);
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- Управление ----------
+  const KEYS = {
+    ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down',
+    ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right',
+  };
+  function pushDir(name) {
+    if (state !== 'play') return;
+    if (queue.length < 3) queue.push(DIRS[name]);
+  }
+  document.addEventListener('keydown', e => {
+    if (KEYS[e.code]) { e.preventDefault(); pushDir(KEYS[e.code]); }
+    else if (e.code === 'Space') {
+      e.preventDefault();
+      if (state === 'play' || state === 'paused') togglePause();
+      else start();
+    } else if (e.code === 'Enter' && state !== 'play') {
+      state === 'paused' ? togglePause() : start();
+    }
+  });
+
+  let touchStart = null;
+  canvas.addEventListener('touchstart', e => {
+    touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  }, { passive: true });
+  canvas.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+  canvas.addEventListener('touchend', e => {
+    if (!touchStart) return;
+    const dx = e.changedTouches[0].clientX - touchStart.x;
+    const dy = e.changedTouches[0].clientY - touchStart.y;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) > 20) {
+      pushDir(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+    }
+    touchStart = null;
+  });
+
+  startBtn.addEventListener('click', () => {
+    state === 'paused' ? togglePause() : start();
+  });
+
+  reset();
+  state = 'idle';
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
